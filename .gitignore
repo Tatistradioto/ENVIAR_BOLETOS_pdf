@@ -1,0 +1,6 @@
+credentials.json
+token.pickle
+controle_envios.txt
+.env
+__pycache__/
+*.log
