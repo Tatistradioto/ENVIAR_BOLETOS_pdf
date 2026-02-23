@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 from datetime import datetime
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -74,7 +75,21 @@ for arquivo in os.listdir(PASTA_BOLETOS):
         continue
 
     # -------- BOLETOS --------
+    # Extrai dados do boleto usando as funções melhoradas
     nome, cnpj, valor, vencimento = extrair_dados_cliente(texto)
+    
+    # Debug - mostra o que foi extraído
+    print(f"\n📄 Processando: {arquivo}")
+    print(f"   Nome: {nome}")
+    print(f"   CNPJ: {cnpj}")
+    print(f"   Valor: {valor}")
+    print(f"   Vencimento: {vencimento}")
+
+    if not cnpj:
+        # Tenta extrair CNPJ diretamente do PDF
+        from extrair_cnpj import extrair_cnpj_cliente as extrair_cnpj_direto
+        cnpj = extrair_cnpj_direto(caminho_pdf)
+        print(f"   CNPJ (extração direta): {cnpj}")
 
     if not cnpj:
         LOG_ERROS.append(f"{arquivo} → CNPJ não encontrado no boleto")
@@ -82,10 +97,26 @@ for arquivo in os.listdir(PASTA_BOLETOS):
 
     if not valor:
         LOG_ERROS.append(f"{arquivo} → Valor não encontrado no boleto")
-        continue
+        # Tenta extrair valor com método alternativo
+        match_valor = re.search(r'(\d{1,3}(?:\.\d{3})*,\d{2})', texto)
+        if match_valor:
+            valor = match_valor.group(1).replace(".", "").replace(",", ".")
+            print(f"   Valor (método alternativo): {valor}")
+
+    if not vencimento:
+        vencimento = f"{datetime.now().day:02d}/{datetime.now().month:02d}/{datetime.now().year}"
+        print(f"   Vencimento (gerado): {vencimento}")
 
     cnpj = limpar_cnpj(cnpj)
-    vencimento = f"{datetime.now().month:02d}/{datetime.now().year}"
+
+    # Se não tem nome, usa um placeholder
+    if not nome or nome == "None":
+        nome = "Cliente"
+        # Tenta extrair nome do nome do arquivo
+        nome_arquivo = arquivo.replace('.pdf', '').replace('_', ' ').replace('-', ' ')
+        if len(nome_arquivo) > 5 and not re.search(r'\d{4,}', nome_arquivo):
+            nome = nome_arquivo[:50]
+            print(f"   Nome (do arquivo): {nome}")
 
     documentos_por_cnpj.setdefault(cnpj, {"boletos": [], "nfs": []})
 
@@ -96,8 +127,7 @@ for arquivo in os.listdir(PASTA_BOLETOS):
         "valor": valor,
         "vencimento": vencimento
     })
-
-
+    
 # =========================================================
 # 2️⃣ ENVIAR AGRUPADO
 # =========================================================
@@ -106,17 +136,34 @@ for cnpj, dados in documentos_por_cnpj.items():
     emails = buscar_email_por_cnpj(cnpj)
 
     if not emails:
-        LOG_ERROS.append(f"CNPJ {cnpj} → E-mail não encontrado")
+        # Pega o nome do primeiro boleto ou NF deste CNPJ
+        nome_cliente = "Desconhecido"
+        if dados["boletos"]:
+            nome_cliente = dados["boletos"][0]["nome"]
+        elif dados["nfs"]:
+            nome_cliente = dados["nfs"][0]["nome"]
+        
+        LOG_ERROS.append(f"❌ CNPJ {cnpj} - {nome_cliente} → E-mail não encontrado")
         continue
 
     for email in emails:
+        print(f"\n📧 Processando envios para: {email}")
 
         # 📄 ENVIAR NOTAS
         for nf in dados["nfs"]:
             if not ja_enviado(nf["arquivo"], cnpj, email):
-                enviar_nota_fiscal(email, nf["caminho"], nf["numero_nf"], nf["nome"])
+                enviar_nota_fiscal(
+                    email,
+                    nf["caminho"],
+                    nf["nome"],
+                    nf["numero_nf"]
+                )
                 registrar_envio(nf["arquivo"], cnpj, email)
-                LOG_SUCESSO.append(f"NF {nf['numero_nf']} enviada para {email}")
+                LOG_SUCESSO.append(f"✅ NF {nf['numero_nf']} - {nf['nome']} enviada para {email}")
+                print(f"   ✅ NF enviada: {nf['numero_nf']} - {nf['nome']}")
+            else:
+                print(f"   ⏭️ NF já enviada: {nf['numero_nf']} - {nf['nome']} (duplicado)")
+                LOG_SUCESSO.append(f"⏭️ NF {nf['numero_nf']} - {nf['nome']} já enviada para {email} (duplicado)")
 
         # 💰 ENVIAR BOLETOS
         for boleto in dados["boletos"]:
@@ -129,17 +176,32 @@ for cnpj, dados in documentos_por_cnpj.items():
                     boleto["vencimento"]
                 )
                 registrar_envio(boleto["arquivo"], cnpj, email)
-                LOG_SUCESSO.append(f"Boleto {boleto['arquivo']} enviado para {email}")
+                LOG_SUCESSO.append(f"✅ Boleto {boleto['arquivo']} - {boleto['nome']} enviado para {email}")
+                print(f"   ✅ Boleto enviado: {boleto['nome']}")
+            else:
+                print(f"   ⏭️ Boleto já enviado: {boleto['nome']} (duplicado)")
+                LOG_SUCESSO.append(f"⏭️ Boleto {boleto['arquivo']} - {boleto['nome']} já enviado para {email} (duplicado)")
 
 
 # =========================================================
 # 📊 RELATÓRIO FINAL
 # =========================================================
-print("\n✅ ENVIOS REALIZADOS:")
-for s in LOG_SUCESSO:
-    print("-", s)
+print("\n" + "=" * 60)
+print("📊 RESUMO DOS ENVIOS")
+print("=" * 60)
+
+if LOG_SUCESSO:
+    print("\n📤 DOCUMENTOS PROCESSADOS:")
+    for item in LOG_SUCESSO:
+        print(f"  {item}")
+else:
+    print("\n📭 Nenhum documento novo para enviar.")
+    print("   Todos os documentos já foram enviados anteriormente!")
 
 if LOG_ERROS:
     print("\n❌ ERROS ENCONTRADOS:")
     for erro in LOG_ERROS:
-        print("-", erro)
+        print(f"  {erro}")
+
+print("\n💡 Dica: Para reenviar um documento, apague a linha correspondente em controle_envios.txt")
+print("=" * 60)
